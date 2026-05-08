@@ -121,7 +121,6 @@ jobs:
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_EVENT_NAME: pull_request
           MODEL: openrouter/minimax/minimax-m2.7
           USE_GITHUB_TOKEN: "true"
           PROMPT: |
@@ -165,14 +164,15 @@ jobs:
             ## Rules
             - APPROVED only if no BLOCKER or CRITICAL exists.
             - Any BLOCKER → verdict must be NOT READY.
-        run: opencode github run
+        run: |
+          export GITHUB_EVENT_NAME=pull_request
+          opencode github run
 
       - name: Run OpenCode review (main)
         if: steps.pr-context.outputs.base_ref == 'main' && steps.gate.outputs.skip != 'true'
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_EVENT_NAME: pull_request
           MODEL: openrouter/minimax/minimax-m2.7
           USE_GITHUB_TOKEN: "true"
           PROMPT: |
@@ -226,7 +226,9 @@ jobs:
             - Any BLOCKER (failing CI, merge conflicts, draft status, critical bug) →
               verdict must be NOT READY.
             - All output in English, Markdown format.
-        run: opencode github run
+        run: |
+          export GITHUB_EVENT_NAME=pull_request
+          opencode github run
 
       - name: Enforce review result
         if: always() && steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
