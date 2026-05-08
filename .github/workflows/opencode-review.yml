@@ -245,6 +245,38 @@ jobs:
           export GITHUB_EVENT_PATH="$PR_EVENT"
           opencode github run
 
+      - name: Submit formal review from opencode verdict
+        if: steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr_number=${{ steps.pr-context.outputs.pr_number }}
+          repo=${{ github.repository }}
+          # Get latest comment from github-actions[bot] (opencode posts there)
+          comment=$(curl -sf \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$repo/issues/$pr_number/comments" \
+            | jq -r '[.[] | select(.user.login == "github-actions[bot]")] | last | .body // ""')
+          echo "Latest bot comment (first 200 chars): ${comment:0:200}"
+          if echo "$comment" | grep -qiE '\bAPPROVED\b'; then
+            review_event="APPROVE"
+            body="OpenCode verdict: APPROVED"
+          elif echo "$comment" | grep -qiE 'CHANGES REQUESTED'; then
+            review_event="REQUEST_CHANGES"
+            body="OpenCode verdict: CHANGES REQUESTED"
+          else
+            review_event="REQUEST_CHANGES"
+            body="OpenCode verdict: NOT READY"
+          fi
+          echo "Submitting review event: $review_event"
+          curl -sf -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/$repo/pulls/$pr_number/reviews" \
+            -d "{\"event\":\"$review_event\",\"body\":\"$body\"}"
+
       - name: Enforce review result
         if: always() && steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
         env:
