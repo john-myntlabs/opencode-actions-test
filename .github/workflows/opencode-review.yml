@@ -245,34 +245,6 @@ jobs:
           export GITHUB_EVENT_PATH="$PR_EVENT"
           opencode github run
 
-      - name: Strip opencode session footer from PR comment
-        if: steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          pr_number=${{ steps.pr-context.outputs.pr_number }}
-          repo=${{ github.repository }}
-          comment=$(curl -sf \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$repo/issues/$pr_number/comments" \
-            | jq '[.[] | select(.user.login == "github-actions[bot]")] | last')
-          comment_id=$(echo "$comment" | jq -r '.id // empty')
-          if [ -z "$comment_id" ]; then
-            echo "No bot comment found, skipping footer strip"
-            exit 0
-          fi
-          cleaned=$(echo "$comment" | jq -r '.body // ""' \
-            | sed '/^<a href="https:\/\/opencode\.ai\/s\//,$d')
-          jq -n --arg body "$cleaned" '{"body": $body}' \
-          | curl -sf -X PATCH \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            "https://api.github.com/repos/$repo/issues/comments/$comment_id" \
-            -d @-
-          echo "Session footer stripped from comment $comment_id"
-
       - name: Submit formal review from opencode verdict
         if: steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
         env:
