@@ -99,6 +99,17 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Prepare PR event context for opencode
+        if: steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
+        run: |
+          jq -n \
+            --argjson pr_number ${{ steps.pr-context.outputs.pr_number }} \
+            --arg head_sha "${{ github.event.workflow_run.head_sha }}" \
+            --arg base_ref "${{ steps.pr-context.outputs.base_ref }}" \
+            --arg repo "${{ github.repository }}" \
+            '{"action":"synchronize","pull_request":{"number":$pr_number,"head":{"sha":$head_sha},"base":{"ref":$base_ref}},"repository":{"full_name":$repo}}' \
+            > "$GITHUB_EVENT_PATH"
+
       - name: Install opencode
         if: steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
         run: |
@@ -112,10 +123,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODEL: openrouter/minimax/minimax-m2.7
           USE_GITHUB_TOKEN: "true"
-          PR_NUMBER: ${{ steps.pr-context.outputs.pr_number }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          BASE_REF: ${{ steps.pr-context.outputs.base_ref }}
-          REPO: ${{ github.repository }}
           PROMPT: |
             You are performing a production-grade PR review for the Specswap-Data repository.
             Use CLAUDE.md and CONTRIBUTING.md as the source of truth for conventions and standards.
@@ -158,16 +165,7 @@ jobs:
             - APPROVED only if no BLOCKER or CRITICAL exists.
             - Any BLOCKER → verdict must be NOT READY.
         run: |
-          PR_EVENT=$(mktemp)
-          jq -n \
-            --argjson pr_number "$PR_NUMBER" \
-            --arg head_sha "$HEAD_SHA" \
-            --arg base_ref "$BASE_REF" \
-            --arg repo "$REPO" \
-            '{"action":"synchronize","pull_request":{"number":$pr_number,"head":{"sha":$head_sha},"base":{"ref":$base_ref}},"repository":{"full_name":$repo}}' \
-            > "$PR_EVENT"
           export GITHUB_EVENT_NAME=pull_request
-          export GITHUB_EVENT_PATH="$PR_EVENT"
           opencode github run
 
       - name: Run OpenCode review (main)
@@ -177,10 +175,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MODEL: openrouter/minimax/minimax-m2.7
           USE_GITHUB_TOKEN: "true"
-          PR_NUMBER: ${{ steps.pr-context.outputs.pr_number }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          BASE_REF: ${{ steps.pr-context.outputs.base_ref }}
-          REPO: ${{ github.repository }}
           PROMPT: |
             You are acting as a highly rigorous Senior Staff Engineer performing a deep,
             production-grade review of this PR for the Specswap-Data repository.
@@ -233,16 +227,7 @@ jobs:
               verdict must be NOT READY.
             - All output in English, Markdown format.
         run: |
-          PR_EVENT=$(mktemp)
-          jq -n \
-            --argjson pr_number "$PR_NUMBER" \
-            --arg head_sha "$HEAD_SHA" \
-            --arg base_ref "$BASE_REF" \
-            --arg repo "$REPO" \
-            '{"action":"synchronize","pull_request":{"number":$pr_number,"head":{"sha":$head_sha},"base":{"ref":$base_ref}},"repository":{"full_name":$repo}}' \
-            > "$PR_EVENT"
           export GITHUB_EVENT_NAME=pull_request
-          export GITHUB_EVENT_PATH="$PR_EVENT"
           opencode github run
 
       - name: Enforce review result
