@@ -297,15 +297,15 @@ jobs:
             review_event="REQUEST_CHANGES"
             review_body="OpenCode verdict: ${verdict:-NOT READY}"
             inline_comments=$(printf '%s' "$comment_body" | python3 -c "
-import sys, re, json
-body = sys.stdin.read()
-comments = []
-for chunk in re.split(r'\n(?=#{1,4} |\*\*(?:BLOCKER|CRITICAL|WARNING|NOTE)\b)', body):
-    m = re.search(r'\x60([a-zA-Z0-9_./-]+\.[a-zA-Z]{1,5}):(\d+)(?:-\d+)?\x60', chunk)
-    if m:
-        comments.append({'path': m.group(1), 'line': int(m.group(2)), 'side': 'RIGHT', 'body': chunk.strip()})
-print(json.dumps(comments))
-" 2>/dev/null || echo '[]')
+          import sys, re, json
+          body = sys.stdin.read()
+          comments = []
+          for chunk in re.split(r'\n(?=#{1,4} |\*\*(?:BLOCKER|CRITICAL|WARNING|NOTE)\b)', body):
+              m = re.search(r'\x60([a-zA-Z0-9_./-]+\.[a-zA-Z]{1,5}):(\d+)(?:-\d+)?\x60', chunk)
+              if m:
+                  comments.append({'path': m.group(1), 'line': int(m.group(2)), 'side': 'RIGHT', 'body': chunk.strip()})
+          print(json.dumps(comments))
+          " 2>/dev/null || echo '[]')
           fi
           post_review() {
             printf '%s' "$1" \
