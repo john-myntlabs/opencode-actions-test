@@ -1,0 +1,276 @@
+name: opencode-review
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+concurrency:
+  group: opencode-review-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: OpenCode Review
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      checks: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Post pending status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.event.workflow_run.head_sha }}" \
+            -d '{"state":"pending","context":"opencode-review","description":"OpenCode review in progress...","target_url":"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}'
+
+      - name: Resolve PR context
+        id: pr-context
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo=${{ github.repository }}
+          head_sha=${{ github.event.workflow_run.head_sha }}
+          pr_number="${{ github.event.workflow_run.pull_requests[0].number || '' }}"
+          if [ -z "$pr_number" ]; then
+            pr_number=$(curl -sf \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$repo/commits/$head_sha/pulls" \
+              | jq -r 'map(select(.state == "open")) | first | .number // empty')
+          fi
+          if [ -z "$pr_number" ]; then
+            echo "Unable to resolve PR number for head SHA $head_sha"
+            exit 1
+          fi
+          pr_data=$(curl -sf \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$repo/pulls/$pr_number")
+          base_ref=$(echo "$pr_data" | jq -r '.base.ref // ""')
+          if [ "$base_ref" = "dev" ] || [ "$base_ref" = "main" ]; then
+            echo "matched=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No review needed for base branch: $base_ref"
+            echo "matched=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$base_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Gate checks
+        id: gate
+        if: steps.pr-context.outputs.matched == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr_number=${{ steps.pr-context.outputs.pr_number }}
+          repo=${{ github.repository }}
+          pr_data=$(curl -sf \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$repo/pulls/$pr_number" \
+            || echo '{}')
+          is_draft=$(echo "$pr_data" | jq -r '.draft // false')
+          labels=$(curl -sf \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$repo/issues/$pr_number/labels" \
+            || echo '[]')
+          has_fix_label=$(echo "$labels" | jq -r '[.[].name] | contains(["opencode-fix"])')
+          if [ "$is_draft" = "true" ] || [ "$has_fix_label" = "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Prepare PR event context for opencode
+        if: steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
+        run: |
+          jq -n \
+            --argjson pr_number ${{ steps.pr-context.outputs.pr_number }} \
+            --arg head_sha "${{ github.event.workflow_run.head_sha }}" \
+            --arg base_ref "${{ steps.pr-context.outputs.base_ref }}" \
+            --arg repo "${{ github.repository }}" \
+            '{"action":"synchronize","pull_request":{"number":$pr_number,"head":{"sha":$head_sha},"base":{"ref":$base_ref}},"repository":{"full_name":$repo}}' \
+            > "$GITHUB_EVENT_PATH"
+
+      - name: Install opencode
+        if: steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Run OpenCode review (dev)
+        if: steps.pr-context.outputs.base_ref == 'dev' && steps.gate.outputs.skip != 'true'
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_NAME: pull_request
+          MODEL: openrouter/minimax/minimax-m2.7
+          USE_GITHUB_TOKEN: "true"
+          PROMPT: |
+            You are performing a production-grade PR review for the Specswap-Data repository.
+            Use CLAUDE.md and CONTRIBUTING.md as the source of truth for conventions and standards.
+            Review the current HEAD diff directly — do not trust commit messages.
+
+            Focus on:
+            - Correctness, regressions, edge cases
+            - Architecture, state, async/concurrency behavior
+            - Security risks (input validation, auth/authz, injection/XSS/SSRF, data exposure)
+            - API contracts and backward compatibility
+            - Data integrity, schema/migration safety, production impact
+            - Test and CI reliability (lint, format, tests, build)
+
+            Also validate PR operational state:
+            - draft/open status, mergeability, merge conflicts
+            - reviewDecision, CI checks status
+            - pending comments/reviews
+
+            If the diff is large, prioritize highest-risk areas and state residual risk for unreviewed sections.
+
+            ## Output
+
+            ### 1) Findings
+            Order by severity: BLOCKER → CRITICAL → WARNING → NOTE
+            Each finding must include:
+            - File and snippet
+            - Practical impact
+            - Actionable suggestion
+
+            ### 2) Open Questions / Assumptions
+
+            ### 3) Verdict
+            APPROVED / CHANGES REQUESTED / NOT READY
+
+            ### 4) Next Actions
+            - Must-fix (for CHANGES REQUESTED / NOT READY)
+            - Recommended
+
+            ## Rules
+            - APPROVED only if no BLOCKER or CRITICAL exists.
+            - Any BLOCKER → verdict must be NOT READY.
+        run: opencode github run
+
+      - name: Run OpenCode review (main)
+        if: steps.pr-context.outputs.base_ref == 'main' && steps.gate.outputs.skip != 'true'
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_NAME: pull_request
+          MODEL: openrouter/minimax/minimax-m2.7
+          USE_GITHUB_TOKEN: "true"
+          PROMPT: |
+            You are acting as a highly rigorous Senior Staff Engineer performing a deep,
+            production-grade review of this PR for the Specswap-Data repository.
+            Use CLAUDE.md and CONTRIBUTING.md as the source of truth.
+            Do not trust commit messages — validate against the actual diff.
+
+            ## Objective
+            Identify real production risks, not just code style.
+
+            ## Review Criteria
+            - Correctness, regressions, and edge cases
+            - Architecture, state management, and concurrency risks
+            - Security: XSS, SQL injection, SSRF, prototype pollution, open redirect,
+              command injection, path traversal
+            - Imports and symbols (verify existence and correct scope)
+            - Async flows, concurrency, and error handling
+            - Data integrity, migrations, and production impact
+            - API contract changes and backward compatibility
+            - PR state: draft/open, mergeability, reviewDecision, CI checks, merge conflicts,
+              prior reviews
+            - Schema compatibility and production impact
+            - State/status consistency with existing code
+            - CI checks: lint, format, tests, build
+            - Pending comments/reviews on the PR
+
+            If the diff is large: sample high-risk areas and explicitly state residual risk
+            for unreviewed parts.
+
+            ## Output
+
+            ### 1) Findings
+            Sorted by severity: BLOCKER → CRITICAL → WARNING → NOTE
+            Each finding must include:
+            - File and snippet
+            - Practical impact
+            - Actionable suggestion
+
+            ### 2) Open Questions / Assumptions
+
+            ### 3) Verdict
+            APPROVED / CHANGES REQUESTED / NOT READY
+
+            ### 4) Next Actions
+            - Must-fix
+            - Recommended
+
+            ## Rules
+            - APPROVED only if no relevant risks are found.
+            - Any BLOCKER (failing CI, merge conflicts, draft status, critical bug) →
+              verdict must be NOT READY.
+            - All output in English, Markdown format.
+        run: opencode github run
+
+      - name: Enforce review result
+        if: always() && steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pr_number=${{ steps.pr-context.outputs.pr_number }}
+          repo=${{ github.repository }}
+          state="NONE"
+          for i in 1 2 3 4 5; do
+            state=$(curl -sf \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$repo/pulls/$pr_number/reviews" \
+              | jq -r 'sort_by(.submitted_at) | last | .state // "NONE"' \
+              2>/dev/null || echo "NONE")
+            echo "Attempt $i: Latest review state: $state"
+            if [ "$state" = "APPROVED" ]; then
+              break
+            fi
+            sleep 5
+          done
+          if [ "$state" != "APPROVED" ]; then
+            echo "OpenCode review did not pass (state: $state). Blocking merge."
+            exit 1
+          fi
+          echo "OpenCode review passed."
+
+      - name: Post final status
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ "$JOB_STATUS" = "success" ]; then
+            state="success"
+            desc="OpenCode review approved"
+          else
+            state="failure"
+            desc="OpenCode review did not pass"
+          fi
+          curl -sf -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.event.workflow_run.head_sha }}" \
+            -d "{\"state\":\"$state\",\"context\":\"opencode-review\",\"description\":\"$desc\",\"target_url\":\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
