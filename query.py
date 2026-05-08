@@ -16,3 +16,4 @@ def get_user(username):
 
 def run_report(report_name):
     os.system(f"./reports/{report_name}.sh")
+trigger3
