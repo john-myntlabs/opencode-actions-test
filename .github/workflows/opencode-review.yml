@@ -252,30 +252,30 @@ jobs:
         run: |
           pr_number=${{ steps.pr-context.outputs.pr_number }}
           repo=${{ github.repository }}
-          # Get latest comment from github-actions[bot] (opencode posts there)
-          comment=$(curl -sf \
+          # Extract verdict keyword only — never interpolate untrusted comment content into JSON
+          verdict=$(curl -sf \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$repo/issues/$pr_number/comments" \
-            | jq -r '[.[] | select(.user.login == "github-actions[bot]")] | last | .body // ""')
-          echo "Latest bot comment (first 200 chars): ${comment:0:200}"
-          if echo "$comment" | grep -qiE '\bAPPROVED\b'; then
+            | jq -r '[.[] | select(.user.login == "github-actions[bot]")] | last | .body // ""' \
+            | grep -ioE '\bAPPROVED\b|CHANGES REQUESTED|NOT READY' | head -1)
+          echo "Opencode verdict: $verdict"
+          if [ "$verdict" = "APPROVED" ]; then
             review_event="APPROVE"
-            body="OpenCode verdict: APPROVED"
-          elif echo "$comment" | grep -qiE 'CHANGES REQUESTED'; then
-            review_event="REQUEST_CHANGES"
-            body="OpenCode verdict: CHANGES REQUESTED"
+            review_body="OpenCode verdict: APPROVED"
           else
             review_event="REQUEST_CHANGES"
-            body="OpenCode verdict: NOT READY"
+            review_body="OpenCode verdict: ${verdict:-NOT READY}"
           fi
           echo "Submitting review event: $review_event"
-          curl -sf -X POST \
+          jq -n --arg event "$review_event" --arg body "$review_body" \
+            '{"event": $event, "body": $body}' \
+          | curl -sf -X POST \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             "https://api.github.com/repos/$repo/pulls/$pr_number/reviews" \
-            -d "{\"event\":\"$review_event\",\"body\":\"$body\"}"
+            -d @-
 
       - name: Enforce review result
         if: always() && steps.pr-context.outputs.matched == 'true' && steps.gate.outputs.skip != 'true'
