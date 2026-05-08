@@ -19,3 +19,4 @@ def run_report(report_name):
 trigger3
 trigger4
 trigger5
+
